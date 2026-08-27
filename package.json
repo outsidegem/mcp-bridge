@@ -1,6 +1,6 @@
 {
   "name": "@digital-mineral/mcp-bridge",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "description": "Legacy API to Model Context Protocol (MCP) translation layer",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
