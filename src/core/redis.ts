@@ -24,7 +24,7 @@ export async function checkRateLimit(tenantId: string, limit: number, windowSeco
     try {
         const result = await redis.eval(RATE_LIMIT_SCRIPT, 1, `rl:${tenantId}`, limit, windowSeconds);
         return result === 1;
-    } catch (e) {
+    } catch (e: any) {
         // Redis failure must fail closed
         return false;
     }

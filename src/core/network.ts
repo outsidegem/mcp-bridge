@@ -33,7 +33,7 @@ export class NetworkValidator {
       // Resolve domain to IP to prevent DNS rebinding attacks
       try {
         addresses = await dns.resolve(parsedUrl.hostname);
-      } catch (e) {
+      } catch (e: any) {
         throw new Error('SSRF Blocked: Unresolvable hostname.');
       }
       

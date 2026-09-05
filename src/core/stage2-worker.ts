@@ -9,17 +9,12 @@ export class Stage2Worker {
 
         try {
             await client.query('BEGIN');
-            const claim = await client.query(`
-                UPDATE requests
-                SET state = 'EXECUTING',
-                    worker_id = $1,
-                    lease_token = $2,
-                    expires_at = now() + interval '30 seconds'
-                WHERE id = $3 AND state = 'APPROVED'
-                RETURNING *
-            `, [workerId, leaseToken, requestId]);
+            const claimRes = await client.query(`
+                SELECT worker_claim_request($1, $2, $3) AS r
+            `, [requestId, workerId, leaseToken]);
+            const claim = claimRes.rows[0].r;
 
-            if (claim.rowCount === 0) {
+            if (!claim.success) {
                 await client.query('ROLLBACK');
                 releaseClient(client);
                 return { success: false, error: 'Could not claim request' };
@@ -30,14 +25,12 @@ export class Stage2Worker {
             const isSuccess = Math.random() > 0.5;
             
             await client.query('BEGIN');
-            const resolve = await client.query(`
-                UPDATE requests
-                SET state = $1
-                WHERE id = $2 AND state = 'EXECUTING' AND lease_token = $3
-                RETURNING *
-            `, [isSuccess ? 'EXECUTED' : 'FAILED', requestId, leaseToken]);
+            const resolveRes = await client.query(`
+                SELECT worker_resolve_request($1, $2, $3) AS r
+            `, [requestId, leaseToken, isSuccess ? 'EXECUTED' : 'FAILED']);
+            const resolve = resolveRes.rows[0].r;
 
-            if (resolve.rowCount === 0) {
+            if (!resolve.success) {
                 await client.query('ROLLBACK');
                 releaseClient(client);
                 return { success: false, error: 'Failed to resolve (stale worker)' };
@@ -45,7 +38,7 @@ export class Stage2Worker {
             await client.query('COMMIT');
             releaseClient(client);
             return { success: true, state: isSuccess ? 'EXECUTED' : 'FAILED' };
-        } catch (e) {
+        } catch (e: any) {
             await client.query('ROLLBACK');
             releaseClient(client);
             return { success: false, error: e.message };

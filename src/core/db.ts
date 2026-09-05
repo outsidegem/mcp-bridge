@@ -1,4 +1,5 @@
 import { Pool, PoolClient } from 'pg';
+import crypto from 'crypto';
 
 export enum DbRole {
     GATEWAY = 'gateway_role',
@@ -17,14 +18,22 @@ const pool = new Pool({
     max: 20
 });
 
+const TENANT_SECRET = 'stage2-secret-key-12345';
+
 export async function getClient(role: DbRole, tenantId?: string): Promise<PoolClient> {
     const client = await pool.connect();
     try {
         await client.query(`SET ROLE ${role}`);
         if (tenantId) {
+            const hmac = crypto.createHmac('sha256', TENANT_SECRET);
+            hmac.update(tenantId);
+            const signature = hmac.digest('hex');
+            const token = `${tenantId}.${signature}`;
+            await client.query(`SET app.tenant_token = '${token}'`);
+            // Set old GUC too, in case some non-RLS logic reads it, but remove it from RLS
             await client.query(`SET app.current_tenant = '${tenantId}'`);
         }
-    } catch (e) {
+    } catch (e: any) {
         client.release();
         throw e;
     }
@@ -32,9 +41,11 @@ export async function getClient(role: DbRole, tenantId?: string): Promise<PoolCl
 }
 
 export function releaseClient(client: PoolClient): void {
-    // Reset role and tenant before returning to pool
-    client.query('RESET ROLE; RESET app.current_tenant;')
-          .catch(console.error)
-          .finally(() => client.release());
+    client.query('DISCARD ALL;')
+          .then(() => client.release())
+          .catch((err: any) => {
+              console.error('Failed to reset connection:', err);
+              client.release(err);
+          });
 }
 

@@ -15,7 +15,7 @@ export class Stage2GC {
             await client.query('COMMIT');
             releaseClient(client);
             return { success: true, reaped: res.rowCount };
-        } catch (e) {
+        } catch (e: any) {
             await client.query('ROLLBACK');
             releaseClient(client);
             return { success: false, error: e.message };

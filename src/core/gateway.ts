@@ -3,6 +3,7 @@ import { SecureHttpExecutor } from './executor.js';
 import { AuditLogger } from './audit.js';
 import { RateLimiter } from './rate-limit.js';
 import { NetworkValidator } from './network.js';
+import { validateSchema as realValidateSchema } from './schema-validator.js';
 
 export class PolicyEngine {
   public evaluate(request: McpExecutionRequest, tool: LegacyToolDefinition): AuthDecision {
@@ -35,11 +36,8 @@ export class McpGateway {
     this.registry.set(tool.name, tool);
   }
 
-  // Basic Deep Validation Stub (Can be replaced with Ajv/Zod)
   private validateSchema(args: any, schema: any): boolean {
-    if (typeof args !== 'object' || args === null) return false;
-    // Iterate required keys if defined in a real JSON schema implementation
-    return true; 
+    return realValidateSchema(args, schema);
   }
 
   public async handleRequest(request: McpExecutionRequest): Promise<McpExecutionResult> {
@@ -87,10 +85,13 @@ export class McpGateway {
         latencyMs: result.latencyMs, 
         details: result.success ? 'Execution successful' : (result.error || 'Unknown error') 
       });
+      if (!result.success) {
+        return { success: false, error: 'Internal execution error', latencyMs: result.latencyMs };
+      }
       return result;
     } catch (e: any) {
       this.logger.log({ type: 'SECURITY_VIOLATION', ...baseLog, details: `Execution aborted: ${e.message}` });
-      return { success: false, error: e.message };
+      return { success: false, error: 'Internal execution error' };
     }
   }
 }

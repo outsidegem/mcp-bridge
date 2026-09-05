@@ -84,4 +84,39 @@
 - Zero evidence loss (asynchronous buffering implies data loss upon process crash).
 - Cryptographic immunity against completely compromised DB credentials.
 
-STAGE 2 IMPLEMENTATION: COMPLETE — PENDING ADVERSARIAL VERIFICATION
+
+
+## REGRESSION REPAIR
+
+### 1. Root cause of each of the five failures
+- **Failures 1-3 (SSRF error disclosure):** The Stage 1.3 architecture sanitized network errors (like SSRF blocks or redirects) to "Internal execution error" to prevent leaking internal security diagnostics. During Stage 2 refactoring, the `McpGateway.handleRequest` method in `src/core/gateway.ts` started returning `error.message` verbatim in the untrusted HTTP response when catching execution errors.
+- **Failure 4 (Timeout/DNS errors disclosure):** Similar to above, when `SecureHttpExecutor.execute` encountered a network error like `getaddrinfo ENOTFOUND`, it returned the error string. `McpGateway.handleRequest` returned this detailed failure directly to the client instead of sanitizing it.
+- **Failure 5 (Schema validation regression):** The `McpGateway` had a JSON schema validation method that was replaced with a stub returning `true` for any non-null object. This allowed missing required properties, wrong primitive types, and prohibited additional properties to bypass schema validation.
+
+### 2. Exact implementation changes made
+- **Error Sanitization:** Modified `McpGateway.handleRequest` in `src/core/gateway.ts` to log the detailed error (preserving internal observability) but return `{ success: false, error: 'Internal execution error' }` for execution exceptions and network errors.
+- **Schema Validation:** Implemented a real recursive JSON schema validator (`schema-validator.ts`) that correctly handles `required`, `additionalProperties: false`, `enum`, primitive `type` checking, arrays, and nested objects. Imported and used this validator in `McpGateway`.
+- **Stage 2 Invariants:** Integrated the schema validator into `Stage2Gateway.handleRequest` in `src/core/stage2-gateway.ts` to ensure Stage 2 requests undergo identical validation rules if a tool schema is registered.
+
+### 3. Confirmation that Stage 1.3 invariants were preserved
+All 46 integration tests pass. The exact protections restored are:
+- SSRF blocking and generic error responses.
+- Timeout/DNS error sanitization.
+- Schema validation.
+- All other Stage 1.3 invariants (tenant isolation, concurrent approval protections, etc.) were untouched and verified.
+
+### 4. Test results before repair
+- Tests run: 46
+- Tests passed: 41
+- Tests failed: 5
+
+### 5. Test results after repair
+- Tests run: 46 (integration tests) + 7 (Stage 2 tests) + 5 (gateway tests)
+- Tests passed: All 58
+- Tests failed: 0
+
+### 6. Any remaining limitations
+- Network payload execution still assumes well-formed JSON, but could encounter upstream errors which are now properly sanitized. The schema validation implementation is strict but simplistic and lacks complete compliance with JSON Schema drafts (e.g. `pattern`, `minimum`, `$ref`).
+
+
+\nSTAGE 2 IMPLEMENTATION: COMPLETE — PENDING ADVERSARIAL VERIFICATION

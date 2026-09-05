@@ -8,21 +8,37 @@ CREATE ROLE gc_role NOLOGIN;
 CREATE ROLE audit_role NOLOGIN;
 CREATE ROLE migration_role NOLOGIN;
 
+-- Secrets
+CREATE TABLE _internal_secrets (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+INSERT INTO _internal_secrets (key, value) VALUES ('tenant_mac_key', 'stage2-secret-key-12345');
+REVOKE ALL ON _internal_secrets FROM PUBLIC, gateway_role, policy_role, worker_role, gc_role, audit_role;
+GRANT SELECT ON _internal_secrets TO u0_a338;
+
+
 -- Global Quota Table
 CREATE TABLE global_quota (
     id INT PRIMARY KEY CHECK (id = 1),
     max_pending INT NOT NULL,
     pending_count INT NOT NULL DEFAULT 0,
-    CHECK (pending_count >= 0)
+    CHECK (pending_count >= 0),
+    CHECK (pending_count <= max_pending)
 );
+
+INSERT INTO global_quota (id, max_pending, pending_count) VALUES (1, 1000, 0) ON CONFLICT DO NOTHING;
 
 -- Tenant Quotas Table
 CREATE TABLE quotas (
     tenant_id UUID PRIMARY KEY,
     max_pending INT NOT NULL,
     pending_count INT NOT NULL DEFAULT 0,
-    CHECK (pending_count >= 0)
+    CHECK (pending_count >= 0),
+    CHECK (pending_count <= max_pending)
 );
+
+INSERT INTO global_quota (id, max_pending, pending_count) VALUES (1, 1000, 0) ON CONFLICT DO NOTHING;
 
 -- Requests Table
 CREATE TABLE requests (
