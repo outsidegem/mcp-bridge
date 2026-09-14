@@ -75,6 +75,11 @@ export class LocalEscrowAdapter implements ExternalAuthorizationProvider {
     
     // Only a freshly APPROVED request can transition to EXECUTING
     if (record.status === 'APPROVED') {
+      const originalRequestStr = JSON.stringify(record.request);
+      const newRequestStr = JSON.stringify(request);
+      if (originalRequestStr !== newRequestStr) {
+        return false;
+      }
       record.status = 'EXECUTING';
       return true;
     }
