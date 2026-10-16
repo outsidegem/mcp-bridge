@@ -1,9 +1,11 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import dns from 'node:dns/promises';
 import { Stage2Gateway } from '../src/core/stage2-gateway.js';
 import { Stage2PolicyEngine } from '../src/core/stage2-policy.js';
 import { Stage2Worker } from '../src/core/stage2-worker.js';
 import { Stage2GC } from '../src/core/stage2-gc.js';
-import { getClient, DbRole, releaseClient } from '../src/core/db.js';
+import { getClient, DbRole, releaseClient, resolveDbConfig, sanitizeDbError } from '../src/core/db.js';
+import { NetworkValidator, SecureHttpExecutor, EnvironmentCredentialProvider } from '../src/index.js';
 import { v4 as uuidv4 } from 'uuid';
 
 describe('Stage 2 Implementation', () => {
@@ -62,7 +64,7 @@ describe('Stage 2 Implementation', () => {
         let tenantId = await setupTenant();
         const req = { tenantId, targetTool: 'toolB', idempotencyKey: 'key3', payload: { b: 2 } };
         const res = await gateway.handleRequest(req);
-        
+
         // Check pending_count is 1 for tenant
         const client = await getClient(DbRole.MASTER);
         let q = await client.query('SELECT pending_count FROM quotas WHERE tenant_id = $1', [tenantId]);
@@ -94,7 +96,7 @@ describe('Stage 2 Implementation', () => {
         let tenantId = await setupTenant();
         const req = { tenantId, targetTool: 'toolC', idempotencyKey: 'key4', payload: { c: 3 } };
         const r1 = await gateway.handleRequest(req);
-        
+
         const client = await getClient(DbRole.GATEWAY, tenantId);
         await expect(
             client.query("UPDATE requests SET payload = '{\"c\":4}' WHERE id = $1", [r1.id])
@@ -126,11 +128,103 @@ describe('Stage 2 Implementation', () => {
             UPDATE requests SET state = 'EXECUTED' WHERE id = $1 AND state = 'EXECUTING' AND lease_token = $2
         `, [r1.id, leaseToken]);
         expect(wRes.rowCount).toBe(0);
-        
+
         const finalState = await master.query('SELECT state FROM requests WHERE id = $1', [r1.id]);
         expect(finalState.rows[0].state).toBe('FAILED_UNKNOWN');
 
         releaseClient(workerClient);
         releaseClient(master);
+    });
+
+    describe('Hardened SSRF & Executor Defenses', () => {
+        it('blocks IPv4-mapped IPv6 addresses in both dotted-quad and URL hex forms', async () => {
+            await expect(NetworkValidator.validateSafeTarget('https://[::ffff:127.0.0.1]/admin')).rejects.toThrow('SSRF Blocked');
+            await expect(NetworkValidator.validateSafeTarget('https://[::ffff:10.0.0.1]/admin')).rejects.toThrow('SSRF Blocked');
+            await expect(NetworkValidator.validateSafeTarget('https://[::ffff:172.16.0.1]/admin')).rejects.toThrow('SSRF Blocked');
+            await expect(NetworkValidator.validateSafeTarget('https://[::ffff:192.168.1.1]/admin')).rejects.toThrow('SSRF Blocked');
+            await expect(NetworkValidator.validateSafeTarget('https://[::ffff:169.254.169.254]/latest/meta-data')).rejects.toThrow('SSRF Blocked');
+            await expect(NetworkValidator.validateSafeTarget('https://[::ffff:0.0.0.0]/')).rejects.toThrow('SSRF Blocked');
+            expect(NetworkValidator.isBlockedIp('::ffff:127.0.0.1')).toBe(true);
+            expect(NetworkValidator.isBlockedIp('::ffff:169.254.169.254')).toBe(true);
+        });
+
+        it('blocks IPv6 loopback, link-local, unique-local, and unspecified addresses', async () => {
+            await expect(NetworkValidator.validateSafeTarget('https://[::1]/admin')).rejects.toThrow('SSRF Blocked');
+            await expect(NetworkValidator.validateSafeTarget('https://[::]/admin')).rejects.toThrow('SSRF Blocked');
+            await expect(NetworkValidator.validateSafeTarget('https://[fc00::1]/admin')).rejects.toThrow('SSRF Blocked');
+            await expect(NetworkValidator.validateSafeTarget('https://[fd12:3456::1]/admin')).rejects.toThrow('SSRF Blocked');
+            await expect(NetworkValidator.validateSafeTarget('https://[fe80::1]/admin')).rejects.toThrow('SSRF Blocked');
+        });
+
+        it('blocks URL credentials, non-HTTPS protocols, and DNS resolving to private IPs', async () => {
+            await expect(NetworkValidator.validateSafeTarget('http://example.com/api')).rejects.toThrow('Only HTTPS is allowed');
+            await expect(NetworkValidator.validateSafeTarget('https://user:pass@example.com/api')).rejects.toThrow('Credentials in URL');
+            await expect(NetworkValidator.validateSafeTarget('https://metadata.google.internal/computeMetadata/v1/')).rejects.toThrow('SSRF Blocked');
+
+            const dnsSpy = vi.spyOn(dns, 'resolve').mockResolvedValueOnce(['::ffff:169.254.169.254'] as any);
+            await expect(NetworkValidator.validateSafeTarget('https://rebinding.attacker.example/api')).rejects.toThrow('SSRF Blocked');
+            dnsSpy.mockRestore();
+        });
+
+        it('validates target URL at the top of SecureHttpExecutor.execute() before fetch', async () => {
+            const fetchSpy = vi.spyOn(global, 'fetch');
+            const executor = new SecureHttpExecutor(new EnvironmentCredentialProvider());
+            const res = await executor.execute(
+                {
+                    name: 'directTool',
+                    description: 'Direct call',
+                    method: 'GET',
+                    targetUrl: 'https://[::ffff:127.0.0.1]/secret',
+                    inputSchema: {}
+                },
+                {}
+            );
+            expect(res.success).toBe(false);
+            expect(res.error).toContain('SSRF Blocked');
+            expect(fetchSpy).not.toHaveBeenCalled();
+            fetchSpy.mockRestore();
+        });
+    });
+
+    describe('Database Configuration & Fail-Closed Production Semantics', () => {
+        it('fails closed when DATABASE_URL or MCP_TENANT_SECRET is missing in production mode', async () => {
+            expect(() =>
+                resolveDbConfig({ mode: 'production', databaseUrl: '', tenantSecret: 'valid-secret-123456' })
+            ).toThrow('DATABASE_URL is required');
+
+            expect(() =>
+                resolveDbConfig({ mode: 'production', databaseUrl: 'postgresql://db.internal:5432/app', tenantSecret: '' })
+            ).toThrow('MCP_TENANT_SECRET is required');
+
+            await expect(
+                getClient(DbRole.GATEWAY, uuidv4(), {
+                    mode: 'production',
+                    databaseUrl: '',
+                    tenantSecret: 'valid-secret'
+                })
+            ).rejects.toThrow('DATABASE_URL is required');
+        });
+
+        it('refuses silent SQLite fallback in production mode when PostgreSQL is unreachable and redacts secrets', async () => {
+            const secretUrl = 'postgresql://prod_user:super_secret_pw_999@127.0.0.1:59999/proddb';
+            const tenantSecret = 'top_secret_hmac_key_888';
+
+            await expect(
+                getClient(DbRole.GATEWAY, uuidv4(), {
+                    mode: 'production',
+                    requirePostgres: true,
+                    databaseUrl: secretUrl,
+                    tenantSecret
+                })
+            ).rejects.toThrow();
+
+            const sanitized = sanitizeDbError(
+                new Error(`Connection failed for ${secretUrl} using key ${tenantSecret}`),
+                [secretUrl, tenantSecret]
+            );
+            expect(sanitized.message).not.toContain('super_secret_pw_999');
+            expect(sanitized.message).not.toContain(tenantSecret);
+            expect(sanitized.message).toContain('[REDACTED]');
+        });
     });
 });

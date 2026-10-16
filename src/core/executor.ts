@@ -10,7 +10,12 @@ export class SecureHttpExecutor {
 
   async execute(tool: LegacyToolDefinition, args: Record<string, unknown>): Promise<McpExecutionResult> {
     const startTime = Date.now();
-    let currentUrl = tool.targetUrl;
+    let currentUrl: string;
+    try {
+      currentUrl = await NetworkValidator.validateSafeTarget(tool.targetUrl);
+    } catch (e: any) {
+      return { success: false, error: e.message, latencyMs: Date.now() - startTime };
+    }
     let attempts = 0;
     
     // Resilience: Basic retry loop for idempotent GET requests

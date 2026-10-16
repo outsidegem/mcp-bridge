@@ -13,9 +13,13 @@ CREATE TABLE _internal_secrets (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-INSERT INTO _internal_secrets (key, value) VALUES ('tenant_mac_key', 'stage2-secret-key-12345');
+-- Populate tenant_mac_key from environment/session configuration during provisioning (never hardcode in SQL)
+INSERT INTO _internal_secrets (key, value)
+SELECT 'tenant_mac_key', current_setting('app.mcp_tenant_secret')
+WHERE current_setting('app.mcp_tenant_secret', true) IS NOT NULL
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 REVOKE ALL ON _internal_secrets FROM PUBLIC, gateway_role, policy_role, worker_role, gc_role, audit_role;
-GRANT SELECT ON _internal_secrets TO u0_a338;
+GRANT SELECT ON _internal_secrets TO CURRENT_USER;
 
 
 -- Global Quota Table

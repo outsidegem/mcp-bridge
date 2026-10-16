@@ -5,3 +5,4 @@ export * from './core/gateway.js';
 export * from './core/audit.js';
 export * from './core/network.js';
 export * from './core/rate-limit.js';
+export * from './core/db.js';
